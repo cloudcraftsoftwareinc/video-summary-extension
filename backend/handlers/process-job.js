@@ -17,97 +17,33 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-async function downloadTikTokVideo(url) {
-  console.log('Starting video download for URL:', url);
+async function getTranscriptFromAPI(url) {
+  console.log('Getting transcript from RapidAPI for URL:', url);
   const options = {
     method: 'GET',
-    url: 'https://tiktok-api23.p.rapidapi.com/api/download/video',
-    params: { url: url },
+    url: 'https://tiktok-video-transcript.p.rapidapi.com/transcribe',
+    params: {
+      url: url,
+      language: 'EN',
+      timestamps: 'false'
+    },
     headers: {
-      'x-rapidapi-key': process.env.RAPIDAPI_KEY,
-      'x-rapidapi-host': 'tiktok-api23.p.rapidapi.com'
+      'x-rapidapi-host': 'tiktok-video-transcript.p.rapidapi.com',
+      'x-rapidapi-key': process.env.RAPIDAPI_KEY
     }
   };
 
-  console.log('Calling RapidAPI...');
   const response = await axios(options);
-  console.log('RapidAPI response:', JSON.stringify(response.data, null, 2));
+  console.log('Transcript API response:', JSON.stringify(response.data, null, 2));
   
-  if (!response.data?.play) {
-    console.error('No play URL in response:', response.data);
-    throw new Error('No video URL found in API response');
+  if (!response.data?.success || !response.data?.text) {
+    throw new Error('Invalid transcript response from API');
   }
 
-  console.log('Got video URL:', response.data.play);
-  const videoResponse = await axios({
-    method: 'GET',
-    url: response.data.play,
-    responseType: 'stream'
-  });
-
-  const tempPath = path.join('/tmp', `video-${Date.now()}.mp4`);
-  console.log('Saving video to:', tempPath);
-  const writer = fs.createWriteStream(tempPath);
-  
-  videoResponse.data.pipe(writer);
-
-  return new Promise((resolve, reject) => {
-    writer.on('finish', () => {
-      console.log('Video download completed');
-      resolve(tempPath);
-    });
-    writer.on('error', (error) => {
-      console.error('Error writing video file:', error);
-      reject(error);
-    });
-  });
-}
-
-async function convertToMp3(videoPath) {
-  console.log('Starting MP3 conversion for:', videoPath);
-  const outputPath = videoPath.replace('.mp4', '.mp3');
-  
-  return new Promise((resolve, reject) => {
-    ffmpeg(videoPath)
-      .toFormat('mp3')
-      .on('start', (commandLine) => {
-        console.log('FFmpeg conversion started:', commandLine);
-      })
-      .on('progress', (progress) => {
-        console.log('FFmpeg progress:', progress);
-      })
-      .on('end', () => {
-        console.log('FFmpeg conversion completed');
-        resolve(outputPath);
-      })
-      .on('error', (error) => {
-        console.error('FFmpeg conversion error:', error);
-        reject(error);
-      })
-      .save(outputPath);
-  });
-}
-
-async function getTranscript(audioPath) {
-  console.log('Starting transcription for:', audioPath);
-  const audioFile = await fs.promises.readFile(audioPath);
-  console.log('Audio file size:', audioFile.length, 'bytes');
-  
-  const formData = new FormData();
-  formData.append('file', new Blob([audioFile]), 'audio.mp3');
-  formData.append('model', 'whisper-1');
-  formData.append('response_format', 'verbose_json');
-  
-  console.log('Calling OpenAI Whisper API...');
-  const transcript = await openai.audio.transcriptions.create({
-    file: formData.get('file'),
-    model: "whisper-1",
-    response_format: "verbose_json",
-    timestamp_granularities: ["word"]
-  });
-
-  console.log('Got transcript:', JSON.stringify(transcript, null, 2));
-  return transcript;
+  return {
+    text: response.data.text,
+    language: 'en'
+  };
 }
 
 const generateSummary = async (transcript) => {
@@ -117,11 +53,11 @@ const generateSummary = async (transcript) => {
       {
         role: "system",
         content: `You are a concise content summarizer. Structure your summaries exactly as follows:
-        1. One short paragraph (2-3 sentences) highlighting the main message
-        2. A single bulleted list of key points (3-5 points)
-        3. (Optional) One "Bonus Insight" at the end - only if there's a particularly noteworthy observation or implication worth mentioning
+        1. One VERY short paragraph (MAX 2 SHORT sentences) highlighting the main message
+        2. A single bulleted list of key takeaways (3-5 points)
+        3. (Optional) One "Bonus Insight" at the end - only if there's a particularly noteworthy observation or implication worth mentioning. Max one SHORT sentence.
         
-        Keep the tone conversational but professional. Use bold text only for the optional "Bonus Insight:" prefix if included.`
+        Keep the tone conversational but professional. Use bold text only for the optional "Bonus:" prefix if included.`
       },
       {
         role: "user",
@@ -172,31 +108,19 @@ async function cleanupFiles(...filePaths) {
 
 module.exports.handler = async (event) => {
   for (const record of event.Records) {
-    let videoPath, audioPath;
     try {
       const { jobId, url } = JSON.parse(record.body);
       console.log(`Starting job ${jobId} for URL: ${url}`);
       
       await updateDynamoDB(jobId, {}, 'processing');
-      console.log('Updated status to processing');
       
-      console.log('Downloading video...');
-      videoPath = await downloadTikTokVideo(url);
-      console.log('Video downloaded to:', videoPath);
-
-      console.log('Converting to MP3...');
-      audioPath = await convertToMp3(videoPath);
-      console.log('Audio converted to:', audioPath);
-
-      console.log('Getting transcript...');
-      const transcriptResponse = await getTranscript(audioPath);
+      const transcriptResponse = await getTranscriptFromAPI(url);
       console.log('Transcript received, length:', transcriptResponse.text.length);
 
       console.log('Generating summary...');
       const summary = await generateSummary(transcriptResponse.text);
       console.log('Summary generated:', summary);
 
-      console.log('Updating database with results...');
       await updateDynamoDB(jobId, {
         transcript: transcriptResponse,
         summary: summary
@@ -208,16 +132,9 @@ module.exports.handler = async (event) => {
       console.error('Error processing job:', error);
       try {
         const jobId = JSON.parse(record.body).jobId;
-        console.log(`Updating job ${jobId} with error status`);
         await updateDynamoDB(jobId, {}, 'error');
       } catch (dbError) {
         console.error('Error updating error status:', dbError);
-      }
-    } finally {
-      if (videoPath || audioPath) {
-        console.log('Cleaning up temporary files...');
-        await cleanupFiles(videoPath, audioPath);
-        console.log('Cleanup completed');
       }
     }
   }
