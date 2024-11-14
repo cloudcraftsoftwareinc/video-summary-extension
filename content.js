@@ -1,4 +1,5 @@
 let cachedSummary = null;
+const API_BASE_URL = 'https://f1m2gfj676.execute-api.us-east-1.amazonaws.com';
 
 function createSummaryButton() {
   const button = document.createElement('button');
@@ -10,35 +11,96 @@ function createSummaryButton() {
     
     // If summary is already showing, just hide it
     if (container.style.display === 'block') {
+      console.log('Hiding existing summary');
       container.style.display = 'none';
       return;
     }
     
     // If we have a cached summary, show it immediately
     if (cachedSummary) {
+      console.log('Using cached summary');
       displaySummary(cachedSummary);
       return;
     }
     
     button.textContent = 'Summarizing...';
     
-    // Simulate a brief loading delay
-    setTimeout(() => {
-      const mockSummary = "This video explains the RISEN framework for prompt engineering with ChatGPT. Key points:\n\n" +
-        "• R - Role: Define the AI's role clearly\n" +
-        "• I - Instructions: Give specific, clear instructions\n" +
-        "• S - Steps: Break down complex tasks\n" +
-        "• E - Examples: Provide examples when needed\n" +
-        "• N - Niche: Specify the domain/context\n\n" +
-        "The speaker emphasizes that this framework helps create more effective prompts for better AI responses.";
+    try {
+      const videoUrl = window.location.href;
+      console.log('Creating job for URL:', videoUrl);
       
-      cachedSummary = mockSummary;
-      displaySummary(mockSummary);
+      // Create the job
+      const createResponse = await fetch(`${API_BASE_URL}/jobs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ url: videoUrl })
+      });
+      
+      if (!createResponse.ok) {
+        console.error('Failed to create job:', await createResponse.text());
+        throw new Error('Failed to create job');
+      }
+      
+      const { jobId } = await createResponse.json();
+      console.log('Job created with ID:', jobId);
+      
+      // Poll for the result
+      console.log('Starting polling for job:', jobId);
+      const pollInterval = setInterval(async () => {
+        console.log('Polling job:', jobId);
+        const statusResponse = await fetch(`${API_BASE_URL}/jobs/${jobId}`);
+        
+        if (!statusResponse.ok) {
+          console.error('Failed to get job status:', await statusResponse.text());
+          clearInterval(pollInterval);
+          throw new Error('Failed to get job status');
+        }
+        
+        const job = await statusResponse.json();
+        console.log('Job status:', job.status);
+        
+        if (job.status === 'completed' && job.transcript) {
+          console.log('Job completed successfully');
+          clearInterval(pollInterval);
+          const summary = formatTranscript(job);
+          console.log('Generated summary:', summary);
+          cachedSummary = summary;
+          displaySummary(summary);
+          button.textContent = 'Summarize Video';
+        } else if (job.status === 'error') {
+          console.error('Job failed:', job);
+          clearInterval(pollInterval);
+          displaySummary('Error processing video. Please try again.');
+          button.textContent = 'Summarize Video';
+        } else {
+          console.log('Job still processing:', job);
+        }
+      }, 2000);
+      
+    } catch (error) {
+      console.error('Error in summarize flow:', error);
+      displaySummary('Error processing video. Please try again.');
       button.textContent = 'Summarize Video';
-    }, 1000);
+    }
   });
   
   return button;
+}
+
+function formatTranscript(job) {
+  // Return the summary if available
+  if (job.summary) {
+    return job.summary;
+  }
+  
+  // Fallback to transcript if no summary
+  if (job.transcript && job.transcript.text) {
+    return job.transcript.text;
+  }
+  
+  return 'No summary available';
 }
 
 function createSummaryContainer() {
@@ -55,11 +117,61 @@ function createSummaryContainer() {
 
 function displaySummary(summary) {
   const container = document.getElementById('tiktok-summary-container');
-  container.innerHTML = summary.replace(/\n/g, '<br>');
+  
+  // Create a div for the markdown content
+  container.innerHTML = `
+    <div class="markdown-content">
+      ${convertMarkdownToHTML(summary)}
+    </div>
+  `;
   container.style.display = 'block';
 }
 
+// Add this new function to handle markdown conversion
+function convertMarkdownToHTML(markdown) {
+  // Basic markdown conversion for bullets and paragraphs
+  return markdown
+    // Convert bullet points
+    .replace(/^\s*[-*]\s+(.+)$/gm, '<li>$1</li>')
+    // Wrap lists in ul tags
+    .replace(/(<li>.*<\/li>)\s*(?=<li>|$)/s, '<ul>$1</ul>')
+    // Convert paragraphs
+    .replace(/^(?!\s*[-*]\s+)(.+)$/gm, '<p>$1</p>')
+    // Convert line breaks
+    .replace(/\n\s*\n/g, '<br>')
+    // Handle bold text
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    // Handle italic text
+    .replace(/\*(.*?)\*/g, '<em>$1</em>');
+}
+
 function init() {
+  // Add this at the beginning of the init function
+  if (!document.querySelector('#tiktok-summary-styles')) {
+    const style = document.createElement('style');
+    style.id = 'tiktok-summary-styles';
+    style.textContent = `
+      .markdown-content {
+        font-size: 1rem;
+        line-height: 1.6;
+      }
+      
+      .markdown-content ul {
+        padding-left: 1.5rem;
+        margin: 1rem 0;
+      }
+      
+      .markdown-content li {
+        margin: 0.5rem 0;
+      }
+      
+      .markdown-content p {
+        margin: 1rem 0;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
   // If we're already processing, don't start another init
   if (document.querySelector('#tiktok-summary-btn')) {
     return;

@@ -1,0 +1,115 @@
+service: tiktok-summarizer
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-1
+  profile: ${opt:profile, 'default'}
+  environment:
+    JOBS_TABLE: ${self:service}-jobs-${sls:stage}
+    JOBS_QUEUE_URL: !Ref JobsQueue
+    OPENAI_API_KEY: ${param:OPENAI_API_KEY}
+    RAPIDAPI_KEY: ${param:RAPIDAPI_KEY}
+    PATH: /opt/nodejs/bin:${env:PATH}
+  httpApi:
+    cors:
+      allowedOrigins:
+        - 'https://www.tiktok.com'
+        - 'https://tiktok.com'
+      allowedHeaders:
+        - Content-Type
+        - Authorization
+      allowedMethods:
+        - GET
+        - POST
+        - OPTIONS
+      allowCredentials: true
+      maxAge: 300
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+          Resource: !GetAtt JobsTable.Arn
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+          Resource: !GetAtt JobsQueue.Arn
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:DeleteObject
+          Resource: 
+            - !Sub ${TempBucket.Arn}/*
+
+functions:
+  createJob:
+    handler: handlers/create-job.handler
+    events:
+      - httpApi:
+          path: /jobs
+          method: POST
+    environment:
+      JOBS_TABLE: ${self:service}-jobs-${sls:stage}
+      JOBS_QUEUE_URL: !Ref JobsQueue
+
+  getJob:
+    handler: handlers/get-job.handler
+    events:
+      - httpApi:
+          path: /jobs/{jobId}
+          method: GET
+    environment:
+      JOBS_TABLE: ${self:service}-jobs-${sls:stage}
+
+  processJob:
+    handler: handlers/process-job.handler
+    timeout: 300
+    memorySize: 2048
+    layers:
+      - arn:aws:lambda:us-east-1:557082990644:layer:tiktok-summarizer-ffmpeg-dev:2
+    events:
+      - sqs:
+          arn: !GetAtt JobsQueue.Arn
+          batchSize: 1
+
+resources:
+  Resources:
+    JobsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-jobs-${sls:stage}
+        AttributeDefinitions:
+          - AttributeName: jobId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: jobId
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+
+    JobsQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-jobs-queue-${sls:stage}
+        VisibilityTimeout: 360
+        MessageRetentionPeriod: 1209600
+        ReceiveMessageWaitTimeSeconds: 20
+
+    TempBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-temp-${sls:stage}
+        LifecycleConfiguration:
+          Rules:
+            - Id: DeleteOldFiles
+              Status: Enabled
+              ExpirationInDays: 1
+

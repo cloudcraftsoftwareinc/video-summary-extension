@@ -1,0 +1,11 @@
+{
+  "name": "tiktok-summarizer",
+  "version": "1.0.0",
+  "description": "TikTok video summarizer with Chrome extension and serverless backend",
+  "scripts": {
+    "deploy": "node scripts/deploy.js"
+  },
+  "devDependencies": {
+    "dotenv": "^16.3.1"
+  }
+} 
