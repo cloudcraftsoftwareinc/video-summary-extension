@@ -1,48 +1,42 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
-const ffmpeg = require('fluent-ffmpeg');
 const { OpenAI } = require('openai');
-const { promisify } = require('util');
-const writeFile = promisify(fs.writeFile);
-const unlink = promisify(fs.unlink);
 
 const dynamoClient = new DynamoDBClient({});
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
-const s3 = new S3Client({});
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
 async function getTranscriptFromAPI(url) {
-  console.log('Getting transcript from RapidAPI for URL:', url);
-  const options = {
-    method: 'GET',
-    url: 'https://tiktok-video-transcript.p.rapidapi.com/transcribe',
-    params: {
-      url: url,
-      language: 'EN',
-      timestamps: 'false'
-    },
+  console.log('Getting transcript for URL:', url);
+  const response = await axios({
+    method: 'POST',
+    url: 'https://submagic-free-tools.fly.dev/api/tiktok-transcription',
     headers: {
-      'x-rapidapi-host': 'tiktok-video-transcript.p.rapidapi.com',
-      'x-rapidapi-key': process.env.RAPIDAPI_KEY
-    }
-  };
+      'Content-Type': 'application/json'
+    },
+    data: { url }
+  });
 
-  const response = await axios(options);
   console.log('Transcript API response:', JSON.stringify(response.data, null, 2));
   
-  if (!response.data?.success || !response.data?.text) {
-    throw new Error('Invalid transcript response from API');
+  if (!response.data?.transcripts?.['eng-US']) {
+    throw new Error('No transcript found in API response');
   }
 
+  // Clean up the WEBVTT formatting from the transcript
+  const cleanTranscript = response.data.transcripts['eng-US']
+    .replace('WEBVTT', '')
+    .replace(/\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}/g, '')
+    .replace(/^\s*\n/gm, '')
+    .trim();
+
   return {
-    text: response.data.text,
-    language: 'en'
+    text: cleanTranscript,
+    language: 'en',
+    title: response.data.videoTitle
   };
 }
 
@@ -91,19 +85,6 @@ async function updateDynamoDB(jobId, data, status = 'completed') {
     console.error('Error updating DynamoDB:', error);
     throw error;
   }
-}
-
-async function cleanupFiles(...filePaths) {
-  const promises = filePaths.map(async (filePath) => {
-    if (!filePath) return;
-    try {
-      await unlink(filePath);
-    } catch (error) {
-      console.error(`Error deleting file ${filePath}:`, error);
-    }
-  });
-
-  await Promise.all(promises);
 }
 
 module.exports.handler = async (event) => {
